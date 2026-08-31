@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-ربات خوندن فیدهای اینوریدر و ارسال پست‌های جدید به کانال تلگرام.
+ربات خوندن فیدهای اینوریدر، ترجمه و خلاصه‌سازی با DeepSeek،
+و ارسال پست‌های جدید به کانال تلگرام.
 
 این اسکریپت:
 1. با استفاده از refresh_token یک access_token جدید از اینوریدر می‌گیرد.
 2. آیتم‌های خوانده‌شده (reading list) را می‌خواند.
-3. آیتم‌هایی که از آخرین اجرا جدیدترند را به تلگرام می‌فرستد.
-4. زمان آخرین آیتم پردازش‌شده را در فایل state.json ذخیره می‌کند.
+3. هر آیتم جدید را با DeepSeek ترجمه، خلاصه و دسته‌بندی می‌کند.
+4. پیام را با قالب مشخص (هشتگ، تیتر، خلاصه، منبع لینک‌دار) به تلگرام می‌فرستد.
+5. زمان آخرین آیتم پردازش‌شده را در فایل state.json ذخیره می‌کند.
 """
 
 import json
@@ -23,6 +25,7 @@ INOREADER_APP_KEY = os.environ["INOREADER_APP_KEY"]
 INOREADER_REFRESH_TOKEN = os.environ["INOREADER_REFRESH_TOKEN"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 
 # اگر می‌خوای فقط یک پوشه/تگ خاص از اینوریدر رو بخونی، این رو ست کن
 # مثال: "user/-/label/MyFolder"  یا خالی بذار برای کل reading list
@@ -30,11 +33,14 @@ INOREADER_STREAM_ID = os.environ.get("INOREADER_STREAM_ID", "user/-/state/com.go
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "state.json")
 MAX_ITEMS_PER_RUN = 20  # حداکثر تعداد پستی که در هر اجرا فرستاده می‌شه (جلوگیری از اسپم)
-SUMMARY_MAX_LEN = 400
+SUMMARY_MAX_LEN_SOURCE = 1500  # قبل از فرستادن به DeepSeek، متن منبع تا این حد کوتاه می‌شه
 
 INOREADER_TOKEN_URL = "https://www.inoreader.com/oauth2/token"
 INOREADER_STREAM_URL = "https://www.inoreader.com/reader/api/0/stream/contents/{stream_id}"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+
+CATEGORIES = ["سیاسی", "اجتماعی", "فرهنگی", "ورزشی", "نظامی"]
 
 
 def get_access_token():
@@ -84,28 +90,72 @@ def fetch_items(access_token):
     return resp.json().get("items", [])
 
 
-def build_message(item):
-    title = strip_html(item.get("title", "بدون عنوان"))
+def translate_and_categorize(title, summary):
+    """
+    متن انگلیسی (یا هر زبان دیگه) رو با DeepSeek ترجمه، خلاصه و دسته‌بندی می‌کنه.
+    خروجی: dict با کلیدهای title, summary, category
+    """
+    source_text = f"عنوان: {title}\n\nمتن: {summary}"[:SUMMARY_MAX_LEN_SOURCE]
+
+    system_prompt = (
+        "تو یک دستیار خبرنگار هستی. متن خبری که به تو داده می‌شود را به فارسیِ روان "
+        "و رسمی ترجمه کن و خلاصه‌ای کوتاه (حداکثر ۳ تا ۴ جمله) از آن بنویس. "
+        "همچنین بر اساس موضوع خبر، دقیقاً یکی از این پنج دسته را انتخاب کن: "
+        f"{', '.join(CATEGORIES)}. "
+        "خروجی را فقط و فقط به‌صورت یک JSON معتبر با این ساختار برگردان و هیچ توضیح "
+        'اضافه‌ای ننویس: {"title": "...", "summary": "...", "category": "..."}'
+    )
+
+    resp = requests.post(
+        DEEPSEEK_URL,
+        headers={
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": source_text},
+            ],
+            "temperature": 0.3,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    data = json.loads(content)
+
+    category = data.get("category", "").strip()
+    if category not in CATEGORIES:
+        category = "اجتماعی"  # دسته‌ی پیش‌فرض اگه مدل چیز عجیبی برگردوند
+
+    return {
+        "title": data.get("title", title).strip(),
+        "summary": data.get("summary", summary).strip(),
+        "category": category,
+    }
+
+
+def build_message(item, translated):
     link = ""
     if item.get("canonical"):
         link = item["canonical"][0].get("href", "")
     elif item.get("alternate"):
         link = item["alternate"][0].get("href", "")
 
-    summary_html = item.get("summary", {}).get("content", "")
-    summary = strip_html(summary_html)
-    if len(summary) > SUMMARY_MAX_LEN:
-        summary = summary[:SUMMARY_MAX_LEN].rsplit(" ", 1)[0] + "…"
+    feed_title = item.get("origin", {}).get("title", "") or "منبع خبر"
 
-    feed_title = item.get("origin", {}).get("title", "")
+    hashtag = f"#{translated['category']}"
+    title = html.escape(translated["title"])
+    summary = html.escape(translated["summary"])
 
-    parts = [f"<b>{html.escape(title)}</b>"]
-    if feed_title:
-        parts.append(f"<i>{html.escape(feed_title)}</i>")
-    if summary:
-        parts.append(html.escape(summary))
+    parts = [hashtag, f"<b>{title}</b>", summary]
+
     if link:
-        parts.append(link)
+        source_line = f'منبع: <a href="{html.escape(link)}">{html.escape(feed_title)}</a>'
+        parts.append(source_line)
 
     return "\n\n".join(parts)
 
@@ -146,11 +196,17 @@ def main():
     max_published = last_published
     for item in new_items:
         try:
-            message = build_message(item)
+            title = strip_html(item.get("title", "بدون عنوان"))
+            summary_html = item.get("summary", {}).get("content", "")
+            summary = strip_html(summary_html)
+
+            translated = translate_and_categorize(title, summary)
+            message = build_message(item, translated)
             send_to_telegram(message)
-            print(f"ارسال شد: {item.get('title', '')[:60]}")
+
+            print(f"ارسال شد: {translated['title'][:60]}")
             max_published = max(max_published, item.get("published", 0))
-            time.sleep(1.5)  # جلوگیری از rate-limit تلگرام
+            time.sleep(2)  # جلوگیری از rate-limit تلگرام و دیپ‌سیک
         except Exception as e:
             print(f"خطا در پردازش آیتم: {e}", file=sys.stderr)
 
