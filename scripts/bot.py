@@ -98,12 +98,17 @@ def translate_and_categorize(title, summary):
     source_text = f"عنوان: {title}\n\nمتن: {summary}"[:SUMMARY_MAX_LEN_SOURCE]
 
     system_prompt = (
-        "تو یک دستیار خبرنگار هستی. متن خبری که به تو داده می‌شود را به فارسیِ روان "
-        "و رسمی ترجمه کن و خلاصه‌ای کوتاه (حداکثر ۳ تا ۴ جمله) از آن بنویس. "
-        "همچنین بر اساس موضوع خبر، دقیقاً یکی از این پنج دسته را انتخاب کن: "
-        f"{', '.join(CATEGORIES)}. "
-        "خروجی را فقط و فقط به‌صورت یک JSON معتبر با این ساختار برگردان و هیچ توضیح "
-        'اضافه‌ای ننویس: {"title": "...", "summary": "...", "category": "..."}'
+        "تو یک مترجم و خبرنگار حرفه‌ای فارسی‌زبان هستی. متن خبری (که ممکنه به "
+        "انگلیسی یا هر زبان دیگه‌ای باشه) در ادامه داده می‌شه. وظیفه تو:\n"
+        "۱. عنوان خبر رو به فارسیِ روان و رسمی ترجمه کن (نه بازنویسی، ترجمه دقیق).\n"
+        "۲. یک خلاصه‌ی ۳ تا ۴ جمله‌ای از متن خبر، به زبان فارسی، بنویس.\n"
+        "۳. دقیقاً یکی از این پنج دسته رو بر اساس موضوع خبر انتخاب کن: "
+        f"{', '.join(CATEGORIES)}\n\n"
+        "مهم: title و summary باید هر دو کاملاً به زبان فارسی نوشته بشن، حتی اگه "
+        "متن ورودی انگلیسی باشه. هیچ کلمه‌ی انگلیسی (به‌جز اسم خاص) نباید توشون باشه.\n\n"
+        "خروجی رو فقط و فقط به‌صورت یک JSON معتبر و دقیقاً با همین سه کلید بده، "
+        "بدون هیچ توضیح یا متن اضافه قبل یا بعدش:\n"
+        '{"title": "عنوان فارسی اینجا", "summary": "خلاصه فارسی اینجا", "category": "یکی از پنج دسته"}'
     )
 
     resp = requests.post(
@@ -123,17 +128,33 @@ def translate_and_categorize(title, summary):
         },
         timeout=60,
     )
+    if not resp.ok:
+        print(f"خطای DeepSeek API: {resp.status_code} {resp.text}", file=sys.stderr)
     resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
-    data = json.loads(content)
 
-    category = data.get("category", "").strip()
+    content = resp.json()["choices"][0]["message"]["content"]
+    print(f"--- پاسخ خام DeepSeek ---\n{content}\n------------------------")
+
+    # بعضی مدل‌ها با وجود response_format، متن رو تو ```json ... ``` می‌پیچن
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(json)?", "", cleaned).rsplit("```", 1)[0].strip()
+
+    data = json.loads(cleaned)
+
+    fa_title = (data.get("title") or "").strip()
+    fa_summary = (data.get("summary") or "").strip()
+    category = (data.get("category") or "").strip()
+
+    if not fa_title or not fa_summary:
+        raise ValueError(f"پاسخ DeepSeek کلیدهای لازم رو نداشت: {data}")
+
     if category not in CATEGORIES:
         category = "اجتماعی"  # دسته‌ی پیش‌فرض اگه مدل چیز عجیبی برگردوند
 
     return {
-        "title": data.get("title", title).strip(),
-        "summary": data.get("summary", summary).strip(),
+        "title": fa_title,
+        "summary": fa_summary,
         "category": category,
     }
 
