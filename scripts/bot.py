@@ -42,6 +42,19 @@ DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 CATEGORIES = ["سیاسی", "اجتماعی", "فرهنگی", "ورزشی", "نظامی"]
 
+CATEGORY_EMOJIS = {
+    "سیاسی": "🏛️",
+    "اجتماعی": "👥",
+    "فرهنگی": "🎭",
+    "ورزشی": "⚽",
+    "نظامی": "🪖",
+}
+
+# حروف مخصوص عربی که در نگارش استاندارد فارسی استفاده نمی‌شن.
+# اگه بعد از "ترجمه"، این حروف هنوز زیاد تو متن باشن، یعنی متن هنوز عربیه.
+ARABIC_ONLY_CHARS = set("يكةى")
+ARABIC_CHECK_THRESHOLD = 2  # حداقل تعداد تکرار برای مشکوک‌شدن
+
 
 def get_access_token():
     """با refresh_token یک access_token تازه می‌گیرد."""
@@ -90,22 +103,28 @@ def fetch_items(access_token):
     return resp.json().get("items", [])
 
 
-def translate_and_categorize(title, summary):
+def looks_untranslated(text):
     """
-    متن انگلیسی (یا هر زبان دیگه) رو با DeepSeek ترجمه، خلاصه و دسته‌بندی می‌کنه.
-    خروجی: dict با کلیدهای title, summary, category
+    بررسی می‌کنه که آیا متن هنوز عربی/غیرفارسی مونده یا نه.
+    با شمردن حروف مخصوص عربی (که تو فارسی استاندارد نیستن).
     """
-    source_text = f"عنوان: {title}\n\nمتن: {summary}"[:SUMMARY_MAX_LEN_SOURCE]
+    count = sum(1 for ch in text if ch in ARABIC_ONLY_CHARS)
+    return count >= ARABIC_CHECK_THRESHOLD
 
+
+def call_deepseek(source_text, extra_instruction=""):
     system_prompt = (
         "تو یک مترجم و خبرنگار حرفه‌ای فارسی‌زبان هستی. متن خبری (که ممکنه به "
-        "انگلیسی یا هر زبان دیگه‌ای باشه) در ادامه داده می‌شه. وظیفه تو:\n"
+        "عربی، انگلیسی یا هر زبان دیگه‌ای باشه) در ادامه داده می‌شه. وظیفه تو:\n"
         "۱. عنوان خبر رو به فارسیِ روان و رسمی ترجمه کن (نه بازنویسی، ترجمه دقیق).\n"
         "۲. یک خلاصه‌ی ۳ تا ۴ جمله‌ای از متن خبر، به زبان فارسی، بنویس.\n"
         "۳. دقیقاً یکی از این پنج دسته رو بر اساس موضوع خبر انتخاب کن: "
         f"{', '.join(CATEGORIES)}\n\n"
-        "مهم: title و summary باید هر دو کاملاً به زبان فارسی نوشته بشن، حتی اگه "
-        "متن ورودی انگلیسی باشه. هیچ کلمه‌ی انگلیسی (به‌جز اسم خاص) نباید توشون باشه.\n\n"
+        "مهم: title و summary باید هر دو ۱۰۰٪ به زبان فارسی نوشته بشن، حتی اگه "
+        "متن ورودی عربی یا انگلیسی باشه. هرگز اصل متن عربی/انگلیسی رو کپی نکن. "
+        "به‌جای حروف عربی «ي، ك، ة» از حروف فارسی «ی، ک، ه» استفاده کن. "
+        "هیچ کلمه‌ی عربی یا انگلیسی (به‌جز اسم خاص افراد/مکان‌ها) نباید توشون باشه.\n"
+        f"{extra_instruction}\n\n"
         "خروجی رو فقط و فقط به‌صورت یک JSON معتبر و دقیقاً با همین سه کلید بده، "
         "بدون هیچ توضیح یا متن اضافه قبل یا بعدش:\n"
         '{"title": "عنوان فارسی اینجا", "summary": "خلاصه فارسی اینجا", "category": "یکی از پنج دسته"}'
@@ -123,7 +142,7 @@ def translate_and_categorize(title, summary):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": source_text},
             ],
-            "temperature": 0.3,
+            "temperature": 0.2,
             "response_format": {"type": "json_object"},
         },
         timeout=60,
@@ -152,11 +171,31 @@ def translate_and_categorize(title, summary):
     if category not in CATEGORIES:
         category = "اجتماعی"  # دسته‌ی پیش‌فرض اگه مدل چیز عجیبی برگردوند
 
-    return {
-        "title": fa_title,
-        "summary": fa_summary,
-        "category": category,
-    }
+    return {"title": fa_title, "summary": fa_summary, "category": category}
+
+
+def translate_and_categorize(title, summary):
+    """
+    متن رو با DeepSeek ترجمه، خلاصه و دسته‌بندی می‌کنه. اگه تشخیص بده که
+    خروجی هنوز ترجمه نشده (مثلاً هنوز عربیه)، یک‌بار با تاکید بیشتر دوباره تلاش می‌کنه.
+    اگه بازم موفق نشه، خطا می‌ده تا اون آیتم اصلاً پست نشه (به‌جای پست ناقص/عربی).
+    """
+    source_text = f"عنوان: {title}\n\nمتن: {summary}"[:SUMMARY_MAX_LEN_SOURCE]
+
+    result = call_deepseek(source_text)
+
+    if looks_untranslated(result["title"]) or looks_untranslated(result["summary"]):
+        print("⚠️ تشخیص داده شد که ترجمه هنوز به فارسی نیست، تلاش دوباره...")
+        extra = (
+            "توجه: بار قبل خروجی تو هنوز به زبان عربی بود که قابل قبول نیست. "
+            "این‌بار حتماً و بدون هیچ استثنایی کل متن رو کامل به فارسی ترجمه کن."
+        )
+        result = call_deepseek(source_text, extra_instruction=extra)
+
+        if looks_untranslated(result["title"]) or looks_untranslated(result["summary"]):
+            raise ValueError("بعد از تلاش دوباره هم ترجمه به فارسی انجام نشد، این آیتم رد شد.")
+
+    return result
 
 
 def build_message(item, translated):
@@ -168,14 +207,15 @@ def build_message(item, translated):
 
     feed_title = item.get("origin", {}).get("title", "") or "منبع خبر"
 
-    hashtag = f"#{translated['category']}"
+    emoji = CATEGORY_EMOJIS.get(translated["category"], "📰")
+    hashtag = f"#{translated['category']} {emoji}"
     title = html.escape(translated["title"])
     summary = html.escape(translated["summary"])
 
-    parts = [hashtag, f"<b>{title}</b>", summary]
+    parts = [hashtag, f"📌 <b>{title}</b>", f"📝 {summary}"]
 
     if link:
-        source_line = f'منبع: <a href="{html.escape(link)}">{html.escape(feed_title)}</a>'
+        source_line = f'🔗 منبع: <a href="{html.escape(link)}">{html.escape(feed_title)}</a>'
         parts.append(source_line)
 
     return "\n\n".join(parts)
