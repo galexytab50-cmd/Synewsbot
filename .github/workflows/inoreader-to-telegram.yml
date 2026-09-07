@@ -1,9 +1,10 @@
 name: Inoreader to Telegram
 
 on:
-  schedule:
-    - cron: "0 * * * *"   # هر ساعت، در دقیقه‌ی صفر
-  workflow_dispatch: {}     # امکان اجرای دستی از تب Actions
+  # زمان‌بندی از طریق cron-job.org انجام می‌شه که هر ۱۵ دقیقه، از طریق
+  # GitHub API، رویداد workflow_dispatch رو صدا می‌زنه (دقیق‌تر و بی‌تاخیرتر
+  # از cron داخلی گیت‌هابه). schedule داخلی گیت‌هاب حذف شده.
+  workflow_dispatch: {}
 
 permissions:
   contents: write
