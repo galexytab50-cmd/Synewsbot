@@ -32,8 +32,12 @@ DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 INOREADER_STREAM_ID = os.environ.get("INOREADER_STREAM_ID", "user/-/state/com.google/reading-list")
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "state.json")
-MAX_ITEMS_PER_RUN = 20  # حداکثر تعداد پستی که در هر اجرا فرستاده می‌شه (جلوگیری از اسپم)
+# سقف تعداد پست در هر اجرا. چون حالا هر ۱۵ دقیقه اجرا می‌شه، معمولاً آیتم‌های
+# جدید کم هستن؛ این عدد فقط یه محافظ در برابر سیل غیرمنتظره‌ست، نه یه محدودیت واقعی.
+MAX_ITEMS_PER_RUN = int(os.environ.get("MAX_ITEMS_PER_RUN", "100"))
+FETCH_COUNT = int(os.environ.get("INOREADER_FETCH_COUNT", "100"))  # تعداد آیتمی که از اینوریدر می‌گیریم
 SUMMARY_MAX_LEN_SOURCE = 1500  # قبل از فرستادن به DeepSeek، متن منبع تا این حد کوتاه می‌شه
+TELEGRAM_SEND_DELAY = 2.5  # ثانیه، برای رعایت محدودیت نرخ ارسال تلگرام
 
 INOREADER_TOKEN_URL = "https://www.inoreader.com/oauth2/token"
 INOREADER_STREAM_URL = "https://www.inoreader.com/reader/api/0/stream/contents/{stream_id}"
@@ -96,7 +100,7 @@ def fetch_items(access_token):
     resp = requests.get(
         url,
         headers={"Authorization": f"Bearer {access_token}"},
-        params={"n": 50},  # آخرین ۵۰ آیتم
+        params={"n": FETCH_COUNT},
         timeout=30,
     )
     resp.raise_for_status()
@@ -267,7 +271,7 @@ def main():
 
             print(f"ارسال شد: {translated['title'][:60]}")
             max_published = max(max_published, item.get("published", 0))
-            time.sleep(2)  # جلوگیری از rate-limit تلگرام و دیپ‌سیک
+            time.sleep(TELEGRAM_SEND_DELAY)  # جلوگیری از rate-limit تلگرام و دیپ‌سیک
         except Exception as e:
             print(f"خطا در پردازش آیتم: {e}", file=sys.stderr)
 
