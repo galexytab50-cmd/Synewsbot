@@ -72,6 +72,8 @@ def get_access_token():
         },
         timeout=30,
     )
+    if not resp.ok:
+        print(f"خطای Inoreader OAuth: {resp.status_code} {resp.text}", file=sys.stderr)
     resp.raise_for_status()
     return resp.json()["access_token"]
 
