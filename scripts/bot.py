@@ -60,14 +60,19 @@ ARABIC_ONLY_CHARS = set("يكةى")
 ARABIC_CHECK_THRESHOLD = 2  # حداقل تعداد تکرار برای مشکوک‌شدن
 
 
-def get_access_token():
-    """با refresh_token یک access_token تازه می‌گیرد."""
+def get_access_token(refresh_token):
+    """
+    با refresh_token یک access_token تازه می‌گیرد.
+    توجه: اینوریدر با هر refresh، یک refresh_token جدید هم برمی‌گردونه و
+    قبلی رو باطل می‌کنه (rotating refresh token). به همین دلیل مقدار
+    جدید رو هم برمی‌گردونیم تا در state.json ذخیره بشه.
+    """
     resp = requests.post(
         INOREADER_TOKEN_URL,
         data={
             "client_id": INOREADER_APP_ID,
             "client_secret": INOREADER_APP_KEY,
-            "refresh_token": INOREADER_REFRESH_TOKEN,
+            "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         },
         timeout=30,
@@ -75,14 +80,16 @@ def get_access_token():
     if not resp.ok:
         print(f"خطای Inoreader OAuth: {resp.status_code} {resp.text}", file=sys.stderr)
     resp.raise_for_status()
-    return resp.json()["access_token"]
+    data = resp.json()
+    new_refresh_token = data.get("refresh_token", refresh_token)
+    return data["access_token"], new_refresh_token
 
 
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"last_published": 0}
+    return {"last_published": 0, "refresh_token": None}
 
 
 def save_state(state):
@@ -247,7 +254,19 @@ def main():
     state = load_state()
     last_published = state.get("last_published", 0)
 
-    access_token = get_access_token()
+    # اگه state.json از قبل یک refresh_token جدیدتر داره، همون رو استفاده کن؛
+    # وگرنه (اولین اجرا) از مقدار Secret استفاده می‌کنیم.
+    current_refresh_token = state.get("refresh_token") or INOREADER_REFRESH_TOKEN
+
+    access_token, new_refresh_token = get_access_token(current_refresh_token)
+
+    # اینوریدر refresh_token رو چرخشی (rotating) می‌ده، یعنی هر بار عوض می‌شه.
+    # فوراً ذخیره‌اش می‌کنیم تا اگه بعداً تو کد خطایی پیش اومد، این مقدار از دست نره.
+    if new_refresh_token != current_refresh_token:
+        state["refresh_token"] = new_refresh_token
+        save_state(state)
+        print("🔄 refresh_token جدید از اینوریدر گرفته و ذخیره شد.")
+
     items = fetch_items(access_token)
 
     # آیتم‌های جدیدتر از آخرین published، مرتب‌شده از قدیم به جدید
@@ -256,7 +275,7 @@ def main():
 
     if not new_items:
         print("هیچ آیتم جدیدی نیست.")
-        return
+        return  # state (شامل refresh_token جدید) قبلاً ذخیره شده
 
     new_items = new_items[:MAX_ITEMS_PER_RUN]
 
@@ -278,6 +297,7 @@ def main():
             print(f"خطا در پردازش آیتم: {e}", file=sys.stderr)
 
     state["last_published"] = max_published
+    state["refresh_token"] = new_refresh_token
     save_state(state)
 
 
